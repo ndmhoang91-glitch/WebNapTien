@@ -609,12 +609,14 @@ def api_create_month():
 
     conn.commit()
     conn.close()
+    BC26_LAST_SYNC["active_month_key"] = month_key
     return jsonify({"success": True, "month_key": month_key, "label": label, "copied_orders": copied})
 
 
 @app.route("/api/dashboard", methods=["GET"])
 def api_dashboard():
     month_key = request.args.get("month_key", "2026-10")
+    BC26_LAST_SYNC["active_month_key"] = month_key
     conn = get_db()
     cur = conn.cursor()
 
@@ -1465,8 +1467,10 @@ def api_template_excel():
 
 BC26_LAST_SYNC = {
     "last_sync_at": None,
-    "total_Read": 0,
+    "active_month_key": None,
+    "total_read": 0,
     "updated_count": 0,
+    "created_count": 0,
     "need_otp_count": 0,
     "has_otp_count": 0,
     "completed_count": 0,
@@ -1490,7 +1494,7 @@ def api_bc26_sync():
 
     data = request.json or {}
     items = data.get("items", [])
-    month_key = data.get("month_key") or "2026-10"
+    month_key = data.get("month_key") or BC26_LAST_SYNC.get("active_month_key")
 
     if not items:
         return jsonify({"success": False, "error": "Không có dữ liệu dòng nào từ bc26.pro"}), 400
@@ -1499,13 +1503,14 @@ def api_bc26_sync():
     cur = conn.cursor()
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    # Lấy tháng mới nhất nếu không truyền month_key
-    cur.execute("SELECT month_key FROM months ORDER BY month_key DESC LIMIT 1")
-    m_row = cur.fetchone()
-    if m_row and not data.get("month_key"):
-        month_key = m_row["month_key"]
+    # Lấy tháng mới nhất nếu chưa có month_key
+    if not month_key:
+        cur.execute("SELECT month_key FROM months ORDER BY month_key DESC LIMIT 1")
+        m_row = cur.fetchone()
+        month_key = m_row["month_key"] if m_row else "2026-10"
 
     updated_count = 0
+    created_count = 0
     need_cnt = 0
     has_cnt = 0
     done_cnt = 0
@@ -1519,6 +1524,7 @@ def api_bc26_sync():
         paid_amt = parse_amount(item.get("paid_amount", 0))
         total_amt = parse_amount(item.get("amount", 0))
         bc_note = str(item.get("status_text", "")).strip()
+        type_hint = str(item.get("order_type_hint", "")).strip().upper()
 
         if bc_state == "COMPLETED":
             new_status = "COMPLETED"
@@ -1533,34 +1539,161 @@ def api_bc26_sync():
             new_otp_status = "NEED_OTP"
             need_cnt += 1
 
-        # Tìm đơn OTP (hoặc Nạp hộ) khớp SĐT trong tháng hiện tại
+        # Tìm các dòng khớp SĐT trong tháng hiện tại (bao gồm OTP, NAP_HO, CHUA_CHAY)
         cur.execute(
-            "SELECT id, order_type, status, otp_status, note FROM orders WHERE month_key = ? AND phone = ? ORDER BY id DESC",
+            "SELECT id, order_type, amount, status, otp_status, note, customer_name FROM orders WHERE month_key = ? AND phone = ? ORDER BY id DESC",
             (month_key, phone),
         )
         matched_rows = cur.fetchall()
-        for r in matched_rows:
-            if r["order_type"] == "OTP":
-                if r["status"] != new_status or r["otp_status"] != new_otp_status or (bc_note and r["note"] != bc_note):
-                    cur.execute(
-                        "UPDATE orders SET status = ?, otp_status = ?, note = ?, updated_at = ? WHERE id = ?",
-                        (new_status, new_otp_status, bc_note or r["note"], now_str, r["id"]),
-                    )
-                    updated_count += 1
-            elif r["order_type"] == "NAP_HO" and new_status == "COMPLETED":
-                if r["status"] != "COMPLETED":
-                    cur.execute(
-                        "UPDATE orders SET status = 'COMPLETED', batch_code = 'x', updated_at = ? WHERE id = ?",
-                        (now_str, r["id"]),
-                    )
-                    updated_count += 1
+        active_rows = [r for r in matched_rows if r["order_type"] in ("OTP", "NAP_HO")]
+        holding_rows = [r for r in matched_rows if r["order_type"] == "CHUA_CHAY"]
+
+        # 1. Nếu SĐT này đang nằm trong "Danh Sách Đơn Chưa Cho Chạy" (CHUA_CHAY) mà đã lên đơn trên bc26.pro -> Tự động gạch "Đã lên đơn"
+        for hr in holding_rows:
+            if hr["status"] != "COMPLETED":
+                cur.execute(
+                    "UPDATE orders SET status = 'COMPLETED', batch_code = 'x', note = 'Đã lên đơn trên bc26.pro', updated_at = ? WHERE id = ?",
+                    (now_str, hr["id"]),
+                )
+                updated_count += 1
+
+        # 2. Nếu đã có đơn trong Trạng thái Đơn OTP hoặc Đơn Nạp hộ của tháng -> Cập nhật trạng thái (& số tiền nếu đơn cũ chưa có tiền)
+        if active_rows:
+            for r in active_rows:
+                target_amt = total_amt if (r["amount"] == 0 and total_amt > 0) else r["amount"]
+                if r["order_type"] == "OTP":
+                    if (
+                        r["status"] != new_status
+                        or r["otp_status"] != new_otp_status
+                        or r["amount"] != target_amt
+                        or (bc_note and r["note"] != bc_note)
+                    ):
+                        cur.execute(
+                            "UPDATE orders SET amount = ?, status = ?, otp_status = ?, batch_code = ?, note = ?, updated_at = ? WHERE id = ?",
+                            (
+                                target_amt,
+                                new_status,
+                                new_otp_status,
+                                "x" if new_status == "COMPLETED" else "",
+                                bc_note or r["note"],
+                                now_str,
+                                r["id"],
+                            ),
+                        )
+                        updated_count += 1
+                elif r["order_type"] == "NAP_HO":
+                    is_napho_done = (new_status == "COMPLETED") or (paid_amt > 0 and target_amt > 0 and paid_amt >= target_amt)
+                    target_nh_status = "COMPLETED" if is_napho_done else "PENDING"
+                    if is_napho_done:
+                        nh_note = "Đã nạp hoàn tất trên bc26"
+                    elif paid_amt > 0:
+                        nh_note = f"Đang nạp trên bc26 ({paid_amt:,}/{target_amt:,})".replace(",", ".")
+                    else:
+                        nh_note = bc_note.replace("Đã có OTP - ", "Đang chạy bc26 - ") if bc_note else r["note"]
+
+                    if r["status"] != target_nh_status or r["amount"] != target_amt or (nh_note and r["note"] != nh_note):
+                        cur.execute(
+                            "UPDATE orders SET amount = ?, status = ?, batch_code = ?, note = ?, updated_at = ? WHERE id = ?",
+                            (target_amt, target_nh_status, "x" if is_napho_done else "", nh_note, now_str, r["id"]),
+                        )
+                        updated_count += 1
+        else:
+            # 3. CHƯA CÓ ĐƠN TRONG THÁNG (Bạn lên đơn trực tiếp bên bc26.pro) -> Tự động tạo đơn mới vào hệ thống!
+            cust_name = ""
+            if holding_rows and holding_rows[0]["customer_name"]:
+                cust_name = holding_rows[0]["customer_name"]
+            if not cust_name:
+                cur.execute("SELECT name FROM customers WHERE phone = ?", (phone,))
+                c_row = cur.fetchone()
+                if c_row and c_row["name"]:
+                    cust_name = c_row["name"]
+            if not cust_name:
+                cur.execute(
+                    "SELECT customer_name FROM orders WHERE phone = ? AND customer_name != '' ORDER BY id DESC LIMIT 1",
+                    (phone,),
+                )
+                prev_o = cur.fetchone()
+                if prev_o and prev_o["customer_name"]:
+                    cust_name = prev_o["customer_name"]
+            if not cust_name:
+                cust_name = f"Khách bc26 ({phone})"
+
+            # Tự động xác định loại đơn (OTP hay NAP_HO)
+            target_type = ""
+            if type_hint in ("OTP", "NAP_HO"):
+                target_type = type_hint
+            if not target_type:
+                cur.execute(
+                    "SELECT order_type FROM orders WHERE phone = ? AND order_type IN ('OTP', 'NAP_HO') ORDER BY id DESC LIMIT 1",
+                    (phone,),
+                )
+                prev_type_row = cur.fetchone()
+                if prev_type_row:
+                    target_type = prev_type_row["order_type"]
+            if not target_type:
+                target_type = "OTP"
+
+            order_amt = total_amt
+            if order_amt == 0 and holding_rows and holding_rows[0]["amount"] > 0:
+                order_amt = holding_rows[0]["amount"]
+
+            if target_type == "NAP_HO":
+                is_nh_done = (new_status == "COMPLETED") or (paid_amt > 0 and order_amt > 0 and paid_amt >= order_amt)
+                ins_status = "COMPLETED" if is_nh_done else "PENDING"
+                ins_otp_status = "NONE"
+                ins_batch = "x" if is_nh_done else ""
+                if is_nh_done:
+                    ins_note = "Đã nạp hoàn tất trên bc26"
+                elif paid_amt > 0:
+                    ins_note = f"Đang nạp trên bc26 ({paid_amt:,}/{order_amt:,})".replace(",", ".")
+                else:
+                    ins_note = bc_note.replace("Đã có OTP - ", "Đang chạy bc26 - ") if bc_note else "Đồng bộ từ bc26.pro"
+            else:
+                ins_status = new_status
+                ins_otp_status = new_otp_status
+                ins_batch = "x" if new_status == "COMPLETED" else ""
+                ins_note = bc_note or "Đồng bộ từ bc26.pro"
+
+            cur.execute(
+                """
+                INSERT INTO orders (
+                    month_key, order_type, phone, customer_name, name_search,
+                    telco, amount, status, otp_status, otp_code, batch_code, note, excel_row, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?, 0, ?)
+                """,
+                (
+                    month_key,
+                    target_type,
+                    phone,
+                    cust_name,
+                    remove_accents(cust_name),
+                    detect_telco(phone),
+                    order_amt,
+                    ins_status,
+                    ins_otp_status,
+                    ins_batch,
+                    ins_note,
+                    now_str,
+                ),
+            )
+            cur.execute(
+                """
+                INSERT OR IGNORE INTO customers (phone, name, name_search, telco, note, updated_at)
+                VALUES (?, ?, ?, ?, '', ?)
+                """,
+                (phone, cust_name, remove_accents(cust_name), detect_telco(phone), now_str),
+            )
+            created_count += 1
+            updated_count += 1
 
     conn.commit()
     conn.close()
 
     BC26_LAST_SYNC["last_sync_at"] = datetime.now().strftime("%H:%M:%S %d/%m/%Y")
+    BC26_LAST_SYNC["active_month_key"] = month_key
     BC26_LAST_SYNC["total_read"] = len(items)
     BC26_LAST_SYNC["updated_count"] = updated_count
+    BC26_LAST_SYNC["created_count"] = created_count
     BC26_LAST_SYNC["need_otp_count"] = need_cnt
     BC26_LAST_SYNC["has_otp_count"] = has_cnt
     BC26_LAST_SYNC["completed_count"] = done_cnt
