@@ -1,0 +1,396 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Quản Lý Đơn Nạp Tiền Theo Tháng</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <!-- Thanh tiêu đề đơn giản -->
+    <header class="topbar">
+        <div class="topbar-left">
+            <h1 class="brand-title">📋 QUẢN LÝ ĐƠN NẠP TIỀN THEO THÁNG</h1>
+        </div>
+
+        <div class="topbar-right">
+            <button class="btn btn-info" onclick="openBc26Modal()" id="btnBc26SyncStatus">
+                🔄 Liên Kết Tự Động bc26.pro
+            </button>
+
+            <div class="month-box">
+                <label for="monthSelect">Tháng:</label>
+                <select id="monthSelect" class="month-select"></select>
+                <button class="btn btn-outline-light" onclick="openNewMonthModal()">+ Thêm Tháng</button>
+            </div>
+
+            <button class="btn btn-success" onclick="openAddOrderModal()">+ Thêm Đơn</button>
+            <button class="btn btn-warning" onclick="openImportModal()">📥 Nhập File Excel</button>
+            <button class="btn btn-light" onclick="exportCurrentMonthExcel()">📤 Xuất File Excel</button>
+        </div>
+    </header>
+
+    <main class="container">
+        <!-- Thanh thống kê gọn nhẹ -->
+        <section class="summary-strip">
+            <div class="stat-item stat-paid">
+                <span class="stat-label">✅ Đã nạp trong tháng:</span>
+                <strong class="stat-val" id="kpiPaidAmount">0 ₫</strong>
+                <span class="stat-sub">(<span id="kpiPaidOrders">0</span> đơn)</span>
+            </div>
+            <div class="stat-item stat-unpaid">
+                <span class="stat-label">⏳ Chưa nạp:</span>
+                <strong class="stat-val" id="kpiUnpaidAmount">0 ₫</strong>
+                <span class="stat-sub">(<span id="kpiUnpaidOrders">0</span> đơn)</span>
+            </div>
+            <div class="stat-item stat-need-otp" onclick="quickFilterOtp('NEED_OTP')" style="cursor:pointer;" title="Bấm để xem các số cần lấy OTP">
+                <span class="stat-label">🔴 Số cần lấy OTP:</span>
+                <strong class="stat-val" id="kpiNeedOtpCount">0 số</strong>
+                <span class="stat-sub">(<span id="kpiNeedOtpAmount">0 ₫</span>)</span>
+            </div>
+            <div class="stat-item stat-has-otp" onclick="quickFilterOtp('HAS_OTP')" style="cursor:pointer;" title="Bấm để xem các số đã có OTP">
+                <span class="stat-label">🔵 Số đã có OTP:</span>
+                <strong class="stat-val" id="kpiHasOtpCount">0 số</strong>
+                <span class="stat-sub">(<span id="kpiHasOtpAmount">0 ₫</span>)</span>
+            </div>
+        </section>
+
+        <!-- Các Sheet giống file Excel -->
+        <nav class="sheet-tabs">
+            <button class="sheet-tab active" data-tab="otp" onclick="switchTab('otp')">
+                Trạng thái Đơn OTP (<span id="countTabOtp">0</span>)
+            </button>
+            <button class="sheet-tab" data-tab="nap_ho" onclick="switchTab('nap_ho')">
+                Trạng thái Đơn Nạp hộ (<span id="countTabNapHo">0</span>)
+            </button>
+            <button class="sheet-tab" data-tab="chua_chay" onclick="switchTab('chua_chay')">
+                Danh Sách Đơn Chưa Cho Chạy (<span id="countTabChuaChay">0</span>)
+            </button>
+            <button class="sheet-tab" data-tab="search" onclick="switchTab('search')">
+                🔍 Danh Sách Tổng KH & Tra Cứu Đã Nạp
+            </button>
+        </nav>
+
+        <!-- BẢNG ĐƠN (OTP / NẠP HỘ / CHƯA CHO CHẠY) -->
+        <section id="panel-orders" class="sheet-panel active">
+            <div class="toolbar">
+                <div class="toolbar-left">
+                    <input type="text" id="orderSearchInput" class="search-input"
+                        placeholder="🔍 Tìm nhanh SĐT hoặc Tên Khách Hàng..."
+                        oninput="debounceLoadOrders()">
+                    <div id="orderFilterButtons" class="filter-group"></div>
+                </div>
+
+                <div class="toolbar-right">
+                    <span class="search-QuickSum">
+                        Đang hiện: <strong id="filterTotalCount">0</strong> dòng |
+                        Đã nạp: <strong class="text-success" id="filterSumPaid">0 ₫</strong> |
+                        Chưa nạp: <strong class="text-danger" id="filterSumUnpaid">0 ₫</strong>
+                    </span>
+                </div>
+            </div>
+
+            <!-- Thanh thao tác nhanh khi tích chọn nhiều dòng -->
+            <div class="bulk-bar" id="bulkActionBar" style="display:none;">
+                <span>Đã chọn <strong id="selectedCount">0</strong> dòng:</span>
+                <button class="btn btn-xs btn-danger" id="btnBulkNeedOtp" onclick="bulkAction('mark_need_otp')">🔴 Cần lấy OTP</button>
+                <button class="btn btn-xs btn-info" id="btnBulkHasOtp" onclick="bulkAction('mark_has_otp')">🔵 Đã có OTP</button>
+                <button class="btn btn-xs btn-success" onclick="bulkAction('mark_paid')">🟢 Đã nạp</button>
+                <button class="btn btn-xs btn-warning" onclick="bulkAction('mark_unpaid')">🟠 Chưa nạp</button>
+                <button class="btn btn-xs btn-primary" id="btnBulkMoveOtp" style="display:none;" onclick="bulkAction('move_to_otp')">➡️ Chuyển sang Đơn OTP</button>
+                <button class="btn btn-xs btn-primary" id="btnBulkMoveNapHo" style="display:none;" onclick="bulkAction('move_to_nap_ho')">➡️ Chuyển sang Nạp hộ</button>
+                <button class="btn btn-xs btn-outline-danger" onclick="bulkAction('delete')">🗑️ Xóa dòng đã chọn</button>
+            </div>
+
+            <div class="table-wrap">
+                <table class="excel-table">
+                    <thead>
+                        <tr>
+                            <th style="width:36px;" class="text-center">
+                                <input type="checkbox" id="selectAllCheckbox" onchange="toggleSelectAll(this)">
+                            </th>
+                            <th style="width:55px;">STT</th>
+                            <th style="width:140px;">SĐT</th>
+                            <th>Tên Khách Hàng</th>
+                            <th style="width:270px;" class="text-center">Trạng Thái</th>
+                            <th style="width:150px;" class="text-right">Số Tiền</th>
+                            <th style="width:220px;">Ghi Chú</th>
+                            <th style="width:65px;" class="text-center">Xóa</th>
+                        </tr>
+                    </thead>
+                    <tbody id="ordersTableBody">
+                        <tr><td colspan="8" class="text-center">Đang tải dữ liệu...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <div class="pagination-bar">
+                <div id="paginationInfo">Trang 1 / 1</div>
+                <div class="pagination-controls" id="paginationControls"></div>
+            </div>
+        </section>
+
+        <!-- BẢNG TRA CỨU TỔNG KHÁCH HÀNG ĐÃ NẠP BAO NHIÊU -->
+        <section id="panel-search" class="sheet-panel">
+            <div class="toolbar">
+                <div class="toolbar-left">
+                    <input type="text" id="custSearchInput" class="search-input" style="min-width:340px;"
+                        placeholder="🔍 Nhập Tên khách hàng hoặc SĐT để xem đã nạp bao nhiêu..."
+                        oninput="debounceLoadCustomerSummary()">
+                    <div class="filter-group" id="custFilterPills">
+                        <button class="filter-btn active" data-filter="ALL" onclick="setCustomerFilter('ALL')">Tất cả</button>
+                        <button class="filter-btn" data-filter="NEED_OTP" onclick="setCustomerFilter('NEED_OTP')">🔴 Cần lấy OTP</button>
+                        <button class="filter-btn" data-filter="HAS_OTP" onclick="setCustomerFilter('HAS_OTP')">🔵 Đã có OTP</button>
+                        <button class="filter-btn" data-filter="UNPAID" onclick="setCustomerFilter('UNPAID')">⏳ Còn chưa nạp</button>
+                        <button class="filter-btn" data-filter="PAID" onclick="setCustomerFilter('PAID')">✅ Đã nạp</button>
+                    </div>
+                </div>
+                <div class="toolbar-right">
+                    <button class="btn btn-sm btn-primary" onclick="openAddCustomerModal()">+ Thêm Khách Hàng Vào Danh Bạ</button>
+                </div>
+            </div>
+
+            <div class="table-wrap">
+                <table class="excel-table">
+                    <thead>
+                        <tr>
+                            <th style="width:55px;">STT</th>
+                            <th style="width:140px;">SĐT</th>
+                            <th>Tên Khách Hàng</th>
+                            <th style="width:160px;" class="text-right">Tổng Đã Nạp (Tháng)</th>
+                            <th style="width:150px;" class="text-right">Đã Nạp OTP</th>
+                            <th style="width:150px;" class="text-right">Đã Nạp Hộ</th>
+                            <th style="width:150px;" class="text-right">Còn Chưa Nạp</th>
+                            <th>Trạng Thái OTP / Đơn Chờ</th>
+                            <th style="width:110px;" class="text-center">Chi Tiết</th>
+                        </tr>
+                    </thead>
+                    <tbody id="customerSummaryBody">
+                        <tr><td colspan="9" class="text-center">Đang tải...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+    </main>
+
+    <!-- MODAL CHI TIẾT KHÁCH HÀNG -->
+    <div class="modal-backdrop" id="customerDetailModal" style="display:none;">
+        <div class="modal-box modal-lg">
+            <div class="modal-header">
+                <h3 id="custModalTitle">Chi Tiết Khách Hàng</h3>
+                <button class="modal-close" onclick="closeModal('customerDetailModal')">&times;</button>
+            </div>
+            <div class="modal-body" id="custModalBody"></div>
+        </div>
+    </div>
+
+    <!-- MODAL NHẬP FILE EXCEL -->
+    <div class="modal-backdrop" id="importExcelModal" style="display:none;">
+        <div class="modal-box">
+            <div class="modal-header">
+                <h3>📥 Nhập File Excel Vào Tháng</h3>
+                <button class="modal-close" onclick="closeModal('importExcelModal')">&times;</button>
+            </div>
+            <div class="modal-body">
+                <form onsubmit="submitImportExcel(event)">
+                    <div class="form-group">
+                        <label>Chọn Tháng lưu dữ liệu:</label>
+                        <input type="month" id="importMonthInput" class="form-control" required>
+                    </div>
+                    <div class="form-group">
+                        <label>Chọn File Excel (.xlsx):</label>
+                        <input type="file" id="importFileInput" class="form-control" accept=".xlsx" required>
+                        <small class="help-text">Tải trực tiếp file Excel giống mẫu <code>Form Chuyển Đơn Nạp Tiền.xlsx</code> hoặc file danh sách KH + Số tiền.</small>
+                    </div>
+                    <div class="form-group">
+                        <label>Cách nhập:</label>
+                        <select id="importModeSelect" class="form-control">
+                            <option value="replace">Thay thế toàn bộ dữ liệu của tháng này bằng file Excel mới</option>
+                            <option value="append">Gộp thêm vào dữ liệu hiện có của tháng này</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>Nếu file chỉ có 1 Sheet thì đưa vào bảng:</label>
+                        <select id="importDefaultTypeSelect" class="form-control">
+                            <option value="OTP">Trạng thái Đơn OTP</option>
+                            <option value="NAP_HO">Trạng thái Đơn Nạp hộ</option>
+                            <option value="CHUA_CHAY">Danh Sách Đơn Chưa Cho Chạy</option>
+                        </select>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-outline" onclick="closeModal('importExcelModal')">Hủy</button>
+                        <button type="submit" class="btn btn-primary" id="btnSubmitImport">Nhập Dữ Liệu</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <!-- MODAL THÊM THÁNG MỚI -->
+    <div class="modal-backdrop" id="newMonthModal" style="display:none;">
+        <div class="modal-box">
+            <div class="modal-header">
+                <h3>📅 Tạo Tháng Mới</h3>
+                <button class="modal-close" onclick="closeModal('newMonthModal')">&times;</button>
+            </div>
+            <div class="modal-body">
+                <form onsubmit="submitNewMonth(event)">
+                    <div class="form-group">
+                        <label>Chọn Tháng / Năm:</label>
+                        <input type="month" id="newMonthKeyInput" class="form-control" required>
+                    </div>
+                    <div class="form-group">
+                        <label>Sao chép danh sách từ tháng cũ (Tùy chọn):</label>
+                        <select id="copyFromMonthSelect" class="form-control">
+                            <option value="">-- Tạo tháng trống (Để tải file Excel mới lên) --</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label class="checkbox-inline">
+                            <input type="checkbox" id="resetStatusCheckbox" checked>
+                            Đặt lại trạng thái về "Chưa nạp / Lấy OTP" cho tháng mới
+                        </label>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-outline" onclick="closeModal('newMonthModal')">Đóng</button>
+                        <button type="submit" class="btn btn-primary">Tạo Tháng</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <!-- MODAL THÊM ĐƠN LẺ -->
+    <div class="modal-backdrop" id="addOrderModal" style="display:none;">
+        <div class="modal-box">
+            <div class="modal-header">
+                <h3>➕ Thêm Đơn Nạp Tiền</h3>
+                <button class="modal-close" onclick="closeModal('addOrderModal')">&times;</button>
+            </div>
+            <div class="modal-body">
+                <form onsubmit="submitAddOrder(event)">
+                    <div class="form-group">
+                        <label>Bảng lưu đơn:</label>
+                        <select id="addOrderType" class="form-control" onchange="toggleAddOrderOtpField()">
+                            <option value="OTP">Trạng thái Đơn OTP</option>
+                            <option value="NAP_HO">Trạng thái Đơn Nạp hộ</option>
+                            <option value="CHUA_CHAY">Danh Sách Đơn Chưa Cho Chạy</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>Số Điện Thoại (*):</label>
+                        <input type="text" id="addOrderPhone" class="form-control" placeholder="VD: 0932929119" required onblur="autoFillCustomerName()">
+                    </div>
+                    <div class="form-group">
+                        <label>Tên Khách Hàng:</label>
+                        <input type="text" id="addOrderName" class="form-control" placeholder="Tự động điền nếu đã có trong Danh sách Tổng KH">
+                    </div>
+                    <div class="form-group">
+                        <label>Số Tiền Cần Nạp (*):</label>
+                        <input type="number" id="addOrderAmount" class="form-control" placeholder="VD: 200000" required>
+                    </div>
+                    <div class="form-group" id="addOrderOtpGroup">
+                        <label>Trạng Thái OTP:</label>
+                        <select id="addOrderOtpStatus" class="form-control">
+                            <option value="NEED_OTP">Lấy OTP (Cần lấy OTP)</option>
+                            <option value="HAS_OTP">Đã có OTP</option>
+                            <option value="DONE_OTP">Đã nạp</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>Ghi chú:</label>
+                        <input type="text" id="addOrderNote" class="form-control" placeholder="Ghi chú (nếu có)...">
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-outline" onclick="closeModal('addOrderModal')">Hủy</button>
+                        <button type="submit" class="btn btn-success">Lưu Đơn</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <!-- MODAL THÊM KHÁCH HÀNG -->
+    <div class="modal-backdrop" id="addCustomerModal" style="display:none;">
+        <div class="modal-box">
+            <div class="modal-header">
+                <h3>📒 Thêm / Sửa Khách Hàng (Danh Sách Tổng KH)</h3>
+                <button class="modal-close" onclick="closeModal('addCustomerModal')">&times;</button>
+            </div>
+            <div class="modal-body">
+                <form onsubmit="submitUpsertCustomer(event)">
+                    <div class="form-group">
+                        <label>Số Điện Thoại (*):</label>
+                        <input type="text" id="custFormPhone" class="form-control" placeholder="VD: 0932929119" required>
+                    </div>
+                    <div class="form-group">
+                        <label>Tên Khách Hàng (*):</label>
+                        <input type="text" id="custFormName" class="form-control" placeholder="VD: Phạm Hoài Nam" required>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-outline" onclick="closeModal('addCustomerModal')">Hủy</button>
+                        <button type="submit" class="btn btn-primary">Lưu Khách Hàng</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <!-- MODAL LIÊN KẾT TỰ ĐỘNG BC26.PRO -->
+    <div class="modal-backdrop" id="bc26Modal" style="display:none;">
+        <div class="modal-box modal-lg">
+            <div class="modal-header">
+                <h3>🔄 Liên Kết Tự Động Kiểm Tra OTP Từ Website bc26.pro</h3>
+                <button class="modal-close" onclick="closeModal('bc26Modal')">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div style="background:#f0fdf4;border:1px solid #86efac;padding:12px 14px;border-radius:6px;margin-bottom:14px;">
+                    <strong>Trạng thái đồng bộ trực tiếp:</strong>
+                    <span id="bc26ModalStatusText" style="color:#15803d;font-weight:700;">Đang chờ tín hiệu từ tab bc26.pro...</span>
+                </div>
+
+                <div style="border:1px solid #bfdbfe;background:#eff6ff;padding:14px;border-radius:6px;margin-bottom:14px;">
+                    <h4 style="color:#1e3a8a;margin-bottom:8px;">⭐ Cách 1 (Nhanh nhất - Kéo nút lên Thanh Dấu Trang Chrome):</h4>
+                    <p style="margin-bottom:10px;line-height:1.5;">
+                        1. Giữ chuột trái vào nút màu xanh bên dưới và <strong>kéo thả lên Thanh dấu trang (Bookmark Bar)</strong> của trình duyệt Chrome:<br>
+                    </p>
+                    <div style="margin:10px 0;">
+                        <a id="bc26BookmarkletLink" href="#"
+                           style="display:inline-block;background:#16a34a;color:#fff;padding:8px 16px;border-radius:6px;font-weight:700;text-decoration:none;box-shadow:0 2px 5px rgba(0,0,0,0.2);">
+                            ⚡ Tự Động Đồng Bộ OTP bc26.pro
+                        </a>
+                    </div>
+                    <p style="line-height:1.5;font-size:13px;color:#1e40af;">
+                        2. Sau đó chuyển sang tab <strong>bc26.pro (mục NẠP CƯỚC)</strong>, bấm 1 lần vào dấu trang <strong>"⚡ Tự Động Đồng Bộ OTP bc26.pro"</strong> vừa kéo lên. Hệ thống sẽ <strong>tự động quét liên tục mỗi 3 giây</strong> mà không làm văng tài khoản bc26.pro của bạn!
+                    </p>
+                </div>
+
+                <div style="border:1px solid #e5e7eb;background:#f9fafb;padding:14px;border-radius:6px;margin-bottom:14px;">
+                    <h4 style="margin-bottom:6px;">🧩 Cách 2 (Tự động 100% vĩnh viễn bằng Tiện ích Chrome có sẵn):</h4>
+                    <ol style="padding-left:18px;line-height:1.6;font-size:13px;">
+                        <li>Mở tab mới trên Chrome, gõ: <code>chrome://extensions</code> rồi nhấn Enter.</li>
+                        <li>Gạt bật nút <strong>Chế độ dành cho nhà phát triển (Developer mode)</strong> ở góc trên bên phải.</li>
+                        <li>Bấm nút <strong>Tải tiện ích đã giải nén (Load unpacked)</strong> ở góc trên bên trái.</li>
+                        <li>Chọn thư mục: <code>E:\Antigavity\Web Nap Tien\tien_ich_chrome_bc26</code>.</li>
+                        <li>Xong! Từ giờ cứ mở trang <code>bc26.pro</code> là trạng thái <strong>Lấy OTP / Đã có OTP / Đã nạp</strong> tự động nhảy sang web này!</li>
+                    </ol>
+                </div>
+
+                <div style="border:1px solid #e5e7eb;padding:14px;border-radius:6px;">
+                    <h4 style="margin-bottom:6px;">📋 Cách 3 (Copy & Dán nhanh bảng từ bc26.pro):</h4>
+                    <p style="font-size:12px;color:#6b7280;margin-bottom:6px;">
+                        Nếu muốn cập nhật tức thì mà chưa bấm dấu trang, bạn có thể bôi đen (Ctrl+A -> Ctrl+C) trên trang Nạp cước bc26.pro rồi dán (Ctrl+V) vào ô dưới đây:
+                    </p>
+                    <textarea id="bc26PasteArea" class="form-control" rows="3" placeholder="Dán nội dung copy từ trang bc26.pro vào đây..."></textarea>
+                    <div style="margin-top:8px;text-align:right;">
+                        <button type="button" class="btn btn-primary" onclick="parseAndSyncPastedBc26()">Phân Tích & Cập Nhật Trạng Thái Ngay</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div id="toastContainer" class="toast-container"></div>
+    <script src="/static/app.js"></script>
+</body>
+</html>
